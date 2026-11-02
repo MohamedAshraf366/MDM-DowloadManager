@@ -8,6 +8,7 @@ import { sanitizeFileName } from '../shared/validation';
 import { hashFile } from './checksum';
 import { DownloadError } from './errors';
 import { atomicPlace, checkDiskSpace, resolveTargetPath } from './fs-utils';
+import { buildYtDlpDownloadArgs, withUrlLast } from './ytdlp-args';
 import { prepareYtDlpRequest } from './ytdlp-request';
 import type {
   DownloadConfig,
@@ -149,15 +150,8 @@ async function probeWithYtDlp(
   genericFallback = false
 ): Promise<MediaProbeResult> {
   const binary = requireYtDlp(runtime);
-  const buildArgs = (extra: string[], requestArgs: string[]): string[] => [
-    ...baseArgs(runtime),
-    '--dump-single-json',
-    '--skip-download',
-    ...extra,
-    ...requestArgs,
-    '--',
-    url
-  ];
+  const buildArgs = (extra: string[], requestArgs: string[]): string[] =>
+    withUrlLast([...baseArgs(runtime), '--dump-single-json', '--skip-download', ...extra, ...requestArgs], url);
   const run = async (extra: string[]): Promise<YtDlpRunResult> => {
     const request = await prepareYtDlpRequest(url, headers, cookies);
     try {
@@ -507,7 +501,11 @@ function extensionFromMimeType(mimeType: string): string {
   return mime.includes('webm') ? '.webm' : '.mp4';
 }
 
-function ytDlpFailure(stderr: string, siteLabel = 'YouTube'): DownloadError {
+/** What yt-dlp prints when ffmpeg or ffprobe really cannot be used. A bare mention of the word is not enough. */
+const FFMPEG_MISSING =
+  /ffmpeg(?:\.exe)?(?: and ffprobe)? (?:is )?not (?:found|installed)|ffprobe and ffmpeg not found|requested merging of multiple formats but ffmpeg is not installed|ffmpeg-location[^\n]*does not exist|no such file or directory[^\n]*ff(?:mpeg|probe)/i;
+
+export function ytDlpFailure(stderr: string, siteLabel = 'YouTube'): DownloadError {
   const text = stderr.replace(new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'g'), '');
   const errorLine = /^(?:ERROR|yt-dlp(?:\.exe)?: error):\s*(.+)$/im.exec(text)?.[1]?.trim() ?? '';
   const lower = text.toLowerCase();
@@ -539,7 +537,7 @@ function ytDlpFailure(stderr: string, siteLabel = 'YouTube'): DownloadError {
   if (/requested format is not available|requested format not available/.test(lower)) {
     return new DownloadError(`The selected ${siteLabel} format is no longer available. Refresh the page and try again.`, 'YOUTUBE_UNAVAILABLE');
   }
-  if (/ffmpeg|ffprobe/.test(lower)) {
+  if (FFMPEG_MISSING.test(text)) {
     return new DownloadError('FFmpeg is required to merge the downloaded video and audio. Install FFmpeg or put it on PATH.', 'TOOL_MISSING');
   }
   if (/video unavailable|not available in your country|has been removed|this video is unavailable/.test(lower)) {
@@ -706,35 +704,18 @@ export class YtDlpDownloadTask {
   private async download(): Promise<void> {
     if (!this.prepared || !this.state) throw new DownloadError(`${this.siteLabel} download not prepared.`, 'INTERNAL');
     const binary = requireYtDlp(this.runtime);
-    const buildArgs = (infoJsonPath: string | null, requestArgs: string[], extra: string[] = []): string[] => {
-      const args = [
-        ...baseArgs(this.runtime),
-        '--newline',
-        '--progress',
-        '--progress-template',
-        'download:MDM_PROGRESS %(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s|%(progress.speed)s|%(progress.eta)s',
-        '--print',
-        'after_move:MDM_FILE %(filepath)s',
-        '--format',
-        this.state!.selector,
-        '--merge-output-format',
-        this.state!.extension === 'webm' ? 'webm' : 'mp4',
-        '--concurrent-fragments',
-        '4',
-        '--buffer-size',
-        '1M',
-        '--continue',
-        '--no-mtime',
-        ...extra,
-        ...(infoJsonPath ? ['--load-info-json', infoJsonPath] : []),
-        '--output',
-        path.join(this.prepared!.tempPath, 'media.%(ext)s'),
-        ...requestArgs
-      ];
-      if (!infoJsonPath) args.push('--', this.config.url);
-      if (this.runtime.ffmpegPath) args.push('--ffmpeg-location', this.runtime.ffmpegPath);
-      return args;
-    };
+    const buildArgs = (infoJsonPath: string | null, requestArgs: string[], extra: string[] = []): string[] =>
+      buildYtDlpDownloadArgs({
+        baseArgs: baseArgs(this.runtime),
+        selector: this.state!.selector,
+        mergeFormat: this.state!.extension === 'webm' ? 'webm' : 'mp4',
+        output: path.join(this.prepared!.tempPath, 'media.%(ext)s'),
+        infoJsonPath,
+        ffmpegPath: this.runtime.ffmpegPath,
+        requestArgs,
+        extra,
+        url: this.config.url
+      });
     const runAttempt = async (
       infoJsonPath: string | null,
       extra: string[] = []

@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AppDatabase, type SecretBox } from '../src/main/database';
 import { SettingsService } from '../src/main/settings';
+import { DEFAULT_SETTINGS } from '../src/shared/defaults';
 
 const directories: string[] = [];
 const databases: AppDatabase[] = [];
@@ -63,10 +64,12 @@ describe('Turbo settings', () => {
     return settings;
   }
 
-  it('is off by default with a sensible ceiling', async () => {
+  it('starts from the shipped defaults, with a ceiling the engine accepts', async () => {
     const settings = await service();
-    expect(settings.get().turboMode).toBe(false);
-    expect(settings.get().turboMaxConnections).toBe(16);
+    expect(settings.get().turboMode).toBe(DEFAULT_SETTINGS.turboMode);
+    expect(settings.get().turboMaxConnections).toBe(DEFAULT_SETTINGS.turboMaxConnections);
+    expect(DEFAULT_SETTINGS.turboMaxConnections).toBeGreaterThanOrEqual(2);
+    expect(DEFAULT_SETTINGS.turboMaxConnections).toBeLessThanOrEqual(64);
   });
 
   it('keeps the ceiling within what the engine and servers can reasonably take', async () => {

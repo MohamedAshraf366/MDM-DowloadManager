@@ -69,7 +69,6 @@ export function AddDownloadDialog() {
     setCookies('');
     setAdvanced(false);
     setTlsAllowInsecure(false);
-    setTlsAllowInsecure(false);
     setTurboMode(settings?.turboMode ?? true);
     setConnections(32);
     setRepeatCount(1);
@@ -78,7 +77,7 @@ export function AddDownloadDialog() {
     setProbing(false);
     setSaving(false);
     setError('');
-  }, [addDialogOpen, settings?.defaultSpeedLimitBps, settings?.checksumAlgorithm]);
+  }, [addDialogOpen, settings?.defaultSpeedLimitBps, settings?.checksumAlgorithm, settings?.turboMode]);
 
   useEffect(() => {
     if (!addDialogOpen) return;

@@ -101,6 +101,9 @@ interface QueueCompletionState {
   hadActivity: boolean;
 }
 
+/** Matches the limit in the Add download dialogs. */
+const MAX_REPEAT_COUNT = 9999;
+
 export class DownloadManager extends EventEmitter {
   private readonly db: AppDatabase;
   private readonly settingsService: SettingsService;
@@ -113,6 +116,12 @@ export class DownloadManager extends EventEmitter {
   private readonly preparingControls = new Map<string, 'pause' | 'cancel' | 'remove' | 'restart'>();
   private readonly restartRequested = new Set<string>();
   private readonly removeRequested = new Set<string>();
+  /**
+   * Batch repeat: the name each copy was asked for. Copies are renamed ("name (1)")
+   * when they finish, so asking for the next copy under the finished name would
+   * stack suffixes: "name (1) (1) (1)...", which grows past the path limit.
+   */
+  private readonly repeatBaseNames = new Map<string, string>();
   private readonly pausedBySchedule = new Set<string>();
   private readonly probeCache = new Map<string, { at: number; result: MediaProbeResult }>();
   private readonly reservations = new Set<string>();
@@ -347,7 +356,7 @@ export class DownloadManager extends EventEmitter {
     if (scheduledAt && Number.isNaN(scheduledAt.getTime())) throw new Error('The scheduled time is not valid.');
     let status: DownloadStatus = 'queued';
     if (scheduledAt && scheduledAt.getTime() > Date.now()) status = 'scheduled';
-    // Downloads always queue first; confirmation starts them.
+    else if (request.startNow === false) status = 'paused';
 
     const record: DownloadRecord = {
       id: crypto.randomUUID(),
@@ -369,8 +378,8 @@ export class DownloadManager extends EventEmitter {
       resumable: true,
       connections,
       turboMode: request.turboMode ?? settings.turboMode,
-      repeatCount: request.repeatCount ?? 1,
-      repeatTotal: request.repeatCount ?? 1,
+      repeatCount: clampInt(request.repeatCount ?? 1, 1, MAX_REPEAT_COUNT),
+      repeatTotal: clampInt(request.repeatTotal ?? request.repeatCount ?? 1, 1, MAX_REPEAT_COUNT),
       speedLimitBps: speedLimit,
       headers,
       cookies: sanitizeCookies(request.cookies ?? ''),
@@ -402,6 +411,7 @@ export class DownloadManager extends EventEmitter {
       recordLog: []
     };
     this.db.insertDownload(record);
+    if ((record.repeatCount ?? 1) > 1 && record.fileNameExplicit) this.repeatBaseNames.set(record.id, record.fileName);
     this.downloads.set(record.id, record);
     this.logger.info(
       'downloads',
@@ -1459,7 +1469,8 @@ export class DownloadManager extends EventEmitter {
       retryBaseDelayMs: settings.retryBaseDelayMs,
       checksum: record.checksum,
       checksumAlgorithm: record.checksumAlgorithm,
-      conflictPolicy: settings.duplicatePolicy,
+      // Auto delete removes the file afterwards, so it must not first replace one the person already has.
+      conflictPolicy: record.autoDelete && settings.duplicatePolicy === 'overwrite' ? 'rename' : settings.duplicatePolicy,
       tlsAllowInsecure: record.tlsAllowInsecure,
       resume:
         record.tempPath && record.segments.length
@@ -1686,22 +1697,45 @@ export class DownloadManager extends EventEmitter {
           if (error) this.logger.warn('downloads', `Could not open ${record.fileName}: ${error}`);
         }
       }
-      // Batch repeat: queue next copy if more remaining
+      // Batch repeat: queue the next copy with everything this one needed. Without
+      // the cookies, headers and referrer a login-protected file is refused (403)
+      // and the whole batch stops after the first copy.
+      const batchTotal = record.repeatTotal ?? 1;
       if (record.repeatCount && record.repeatCount > 1) {
-        const total = record.repeatTotal ?? record.repeatCount;
-        const next = await this.addDownload({
-          url: record.url,
-          fileName: record.fileNameExplicit ? record.fileName : undefined,
-          destinationDir: record.destinationDir,
-          turboMode: record.turboMode,
-          connections: record.connections,
-          autoDelete: record.autoDelete,
-          startNow: true,
-          repeatCount: record.repeatCount - 1,
-        } as AddDownloadRequest);
-        this.logger.info('downloads', `Batch repeat: queued copy ${record.repeatTotal ? record.repeatTotal - record.repeatCount + 2 : 2}/${record.repeatTotal || 1}.`);
-      } else if (record.repeatTotal && record.repeatTotal > 1) {
-        this.host.notify('Batch complete', `All ${record.repeatTotal} downloads finished.`);
+        if (record.kind !== 'http' && record.kind !== 'ftp') {
+          this.logger.warn('downloads', 'Batch repeat is only available for plain HTTP and FTP downloads.');
+        } else {
+          try {
+            const baseName = record.fileNameExplicit ? (this.repeatBaseNames.get(record.id) ?? record.fileName) : undefined;
+            this.repeatBaseNames.delete(record.id);
+            await this.addDownload({
+              url: record.url,
+              fileName: baseName,
+              destinationDir: record.destinationDir,
+              queueId: record.queueId,
+              priority: record.priority,
+              speedLimitBps: record.speedLimitBps,
+              headers: record.headers,
+              cookies: record.cookies,
+              referrer: record.referrer,
+              sourcePageUrl: record.sourcePageUrl,
+              checksum: record.checksum,
+              checksumAlgorithm: record.checksumAlgorithm,
+              tlsAllowInsecure: record.tlsAllowInsecure,
+              turboMode: record.turboMode,
+              connections: record.connections,
+              autoDelete: record.autoDelete,
+              startNow: true,
+              repeatCount: record.repeatCount - 1,
+              repeatTotal: batchTotal
+            });
+            this.logger.info('downloads', `Batch repeat: queued copy ${batchTotal - record.repeatCount + 2} of ${batchTotal}.`);
+          } catch (error) {
+            this.logger.warn('downloads', `Batch repeat stopped: ${(error as Error).message}`);
+          }
+        }
+      } else if (batchTotal > 1) {
+        this.host.notify('Batch complete', `All ${batchTotal} downloads finished.`);
       }
       return;
     }

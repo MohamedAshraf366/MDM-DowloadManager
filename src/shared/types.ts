@@ -268,6 +268,8 @@ export interface AddDownloadRequest {
   turboMode?: boolean;
   connections?: number;
   repeatCount?: number;
+  /** Internal: size of the whole batch, carried from copy to copy. */
+  repeatTotal?: number;
   overrides?: {
     fileName?: string;
     mimeType?: string;

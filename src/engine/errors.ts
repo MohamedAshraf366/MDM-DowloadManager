@@ -35,15 +35,24 @@ export class DownloadError extends Error {
   readonly retryable: boolean;
   readonly statusCode: number | null;
   readonly retryAfterMs: number | null;
+  /** What was found out about the cause (for example who issued a rejected certificate). */
+  readonly detail: string | null;
 
   constructor(
     message: string,
     code: DownloadErrorCode = 'INTERNAL',
-    options: { retryable?: boolean; statusCode?: number | null; retryAfterMs?: number | null; cause?: unknown } = {}
+    options: {
+      retryable?: boolean;
+      statusCode?: number | null;
+      retryAfterMs?: number | null;
+      cause?: unknown;
+      detail?: string | null;
+    } = {}
   ) {
     super(message);
     this.name = 'DownloadError';
     this.code = code;
+    this.detail = options.detail ?? null;
     this.retryable = options.retryable ?? false;
     this.statusCode = options.statusCode ?? null;
     this.retryAfterMs = options.retryAfterMs ?? null;
@@ -84,8 +93,14 @@ export function friendlyErrorMessage(error: unknown): string {
         return 'The network connection was interrupted. Retry to resume.';
       case 'TLS':
         return 'The secure connection could not be verified (the server certificate is invalid, self-signed, or missing a certificate chain). For trusted but misconfigured servers, enable Allow invalid TLS certificates in the download settings.';
-      case 'TLS_CHAIN':
-        return 'The server certificate chain could not be verified. Common causes: antivirus, firewall or proxy software that re-signs HTTPS traffic (its root certificate must be installed in the operating system, then restart MDM), a server that sends an incomplete chain, or a wrong system clock. It can also be temporary on CDN edges, so retry once. If it persists, allow MDM in your security software, or enable Allow invalid TLS certificates for this download only if you trust the server.';
+      case 'TLS_CHAIN': {
+        const reason = error.message.replace(/^TLS certificate chain failed:\s*/i, '').trim();
+        const found = error.detail
+          ? `The server certificate chain could not be verified (${reason}). ${error.detail} If you trust this connection, enable Allow invalid TLS certificates for this download only.`
+          : `The server certificate chain could not be verified${reason ? ` (${reason})` : ''}.`;
+        if (error.detail) return found;
+        return found + ' Common causes: antivirus, firewall or proxy software that re-signs HTTPS traffic (its root certificate must be installed in the operating system, then restart MDM), a server that sends an incomplete chain, or a wrong system clock. It can also be temporary on CDN edges, so retry once. If it persists, allow MDM in your security software, or enable Allow invalid TLS certificates for this download only if you trust the server.';
+      }
       case 'TLS_HANDSHAKE':
         return 'The secure connection could not be established (TLS handshake failed). This is often temporary; retry the download.';
       case 'PROXY':
@@ -146,6 +161,7 @@ export function mapNetworkError(error: unknown, contextUrl?: string): DownloadEr
   const err = error as NodeJS.ErrnoException & { address?: string };
   const code = err?.code ?? '';
   const message = err?.message ?? String(error);
+  const detail = (err as { mdmTlsDetail?: string } | null)?.mdmTlsDetail ?? null;
   const chainError =
     /SELF_SIGNED_CERT_IN_CHAIN|UNABLE_TO_GET_ISSUER_CERT|UNABLE_TO_VERIFY_LEAF_SIGNATURE|CERT_UNTRUSTED|CERT_REJECTED/i.test(
       `${code} ${message}`
@@ -153,7 +169,8 @@ export function mapNetworkError(error: unknown, contextUrl?: string): DownloadEr
   if (chainError) {
     return new DownloadError(`TLS certificate chain failed: ${message}`, 'TLS_CHAIN', {
       retryable: true,
-      cause: error
+      cause: error,
+      detail
     });
   }
   const certError =
@@ -161,7 +178,7 @@ export function mapNetworkError(error: unknown, contextUrl?: string): DownloadEr
       `${code} ${message}`
     );
   if (certError) {
-    return new DownloadError(`TLS verification failed: ${message}`, 'TLS', { retryable: false, cause: error });
+    return new DownloadError(`TLS verification failed: ${message}`, 'TLS', { retryable: false, cause: error, detail });
   }
   const tlsHandshake = /TLS|SSL routines|EPROTO|handshake|tlsv1 alert/i.test(`${code} ${message}`);
   if (tlsHandshake) {

@@ -6,6 +6,7 @@ import type { LookupFunction } from 'node:net';
 import { HttpProxyAgent } from 'http-proxy-agent';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { DownloadError, mapNetworkError } from './errors';
+import { describeTlsFailure, inspectCertificateChain } from './tls-diagnostics';
 import { getTrustedCAs } from './tls-trust';
 import { APP_SHORT_NAME, APP_VERSION } from '../shared/defaults';
 import { redactUrl } from '../shared/validation';
@@ -327,7 +328,12 @@ export class HttpClient {
     const cookieJar = requestOptions.cookieJar;
 
     for (;;) {
-      const response = await this.singleRequest(currentUrl, method, customHeaders, referer, requestOptions.signal, cookieJar);
+      let response: Awaited<ReturnType<HttpClient['singleRequest']>>;
+      try {
+        response = await this.singleRequest(currentUrl, method, customHeaders, referer, requestOptions.signal, cookieJar);
+      } catch (error) {
+        throw await this.explainTlsFailure(error, currentUrl);
+      }
       if (cookieJar) cookieJar.setFromResponse(currentUrl.toString(), response.headers['set-cookie']);
 
       const status = response.status;
@@ -365,6 +371,32 @@ export class HttpClient {
         continue;
       }
       return { ...response, url: currentUrl.toString() };
+    }
+  }
+
+  /**
+   * For a certificate-chain failure on a direct connection, add what the server
+   * actually presented (see tls-diagnostics). Best effort: it never throws, and
+   * it is skipped through a proxy, where the connection we would look at is not
+   * the one that failed. Returns the error to throw.
+   */
+  private async explainTlsFailure(error: unknown, url: URL): Promise<unknown> {
+    if (!(error instanceof DownloadError) || error.code !== 'TLS_CHAIN' || error.detail) return error;
+    if (url.protocol !== 'https:' || this.shouldProxy(url)) return error;
+    try {
+      const inspection = await inspectCertificateChain(url.hostname, Number(url.port) || 443);
+      const detail = describeTlsFailure(url.hostname, inspection);
+      if (!detail) return error;
+      return new DownloadError(error.message, error.code, {
+        retryable: error.retryable,
+        statusCode: error.statusCode,
+        retryAfterMs: error.retryAfterMs,
+        cause: error.cause,
+        detail
+      });
+    } catch {
+      // Diagnostics must never change the outcome of the download.
+      return error;
     }
   }
 
