@@ -1,3 +1,5 @@
+import type { SpeedUnit } from './types';
+
 export function formatBytes(bytes: number | null | undefined, precision = 1): string {
   if (bytes === null || bytes === undefined || !Number.isFinite(bytes) || bytes < 0) return '—';
   if (bytes === 0) return '0 B';
@@ -8,9 +10,29 @@ export function formatBytes(bytes: number | null | undefined, precision = 1): st
   return `${value.toFixed(digits)} ${units[exponent]}`;
 }
 
+let speedUnit: SpeedUnit = 'bytes';
+
+/** Chosen in Settings; the renderer sets it before drawing, so every speed on screen agrees. */
+export function setSpeedUnit(unit: SpeedUnit): void {
+  speedUnit = unit === 'bits' ? 'bits' : 'bytes';
+}
+
+/**
+ * Decimal bits per second, the way speed tests and internet plans quote it.
+ * (formatBytes counts in powers of 1024, so a 32 Mbit/s line would show as
+ * 3.8 "MB/s", which looks nothing like the 32 on the speed test.)
+ */
+export function formatBitRate(bytesPerSecond: number): string {
+  const bits = bytesPerSecond * 8;
+  if (bits >= 1e9) return `${(bits / 1e9).toFixed(2)} Gbit/s`;
+  if (bits >= 1e6) return `${(bits / 1e6).toFixed(bits >= 1e8 ? 0 : 1)} Mbit/s`;
+  if (bits >= 1e3) return `${(bits / 1e3).toFixed(0)} Kbit/s`;
+  return `${bits.toFixed(0)} bit/s`;
+}
+
 export function formatSpeed(bytesPerSecond: number | null | undefined): string {
   if (!bytesPerSecond || bytesPerSecond <= 0) return '—';
-  return `${formatBytes(bytesPerSecond)}/s`;
+  return speedUnit === 'bits' ? formatBitRate(bytesPerSecond) : `${formatBytes(bytesPerSecond)}/s`;
 }
 
 export function formatEta(seconds: number | null | undefined): string {

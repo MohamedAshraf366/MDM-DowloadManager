@@ -16,6 +16,8 @@ export type ChecksumAlgorithm = 'sha256' | 'sha1' | 'md5';
 export type ChecksumStatus = 'pending' | 'verified' | 'mismatch' | 'none';
 export type IpVersion = 'any' | 'ipv4' | 'ipv6';
 export type ThemeMode = 'light' | 'dark' | 'system';
+/** How speeds are shown: bytes per second (MB/s) or decimal bits per second (Mbit/s), as speed tests quote them. */
+export type SpeedUnit = 'bytes' | 'bits';
 export type FileCategory =
   | 'video'
   | 'audio'
@@ -163,6 +165,7 @@ export interface ProxySettings {
 
 export interface AppSettings {
   theme: ThemeMode;
+  speedUnit: SpeedUnit;
   defaultDownloadDir: string;
   categoryFolders: Record<FileCategory, string>;
   categorizeByType: boolean;
@@ -173,6 +176,11 @@ export interface AppSettings {
   turboMode: boolean;
   /** Most connections Turbo may use for one download. */
   turboMaxConnections: number;
+  /**
+   * Optional speed-test result in Mbit/s; 0 = none (MDM learns each network by itself).
+   * A starting point for Turbo only, never a limit.
+   */
+  lineSpeedMbps: number;
   globalSpeedLimitBps: number;
   defaultSpeedLimitBps: number;
   connectTimeoutMs: number;

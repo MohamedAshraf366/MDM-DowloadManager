@@ -47,6 +47,7 @@ import {
   wildcardHostMatch
 } from '../shared/validation';
 import { APP_SHORT_NAME, APP_VERSION, PROGRESS_INTERVAL_MS } from '../shared/defaults';
+import { LineSpeedMemory } from '../engine/line-speed';
 import type { AppDatabase } from './database';
 import type { SettingsService } from './settings';
 import type { AppLogger } from './logger';
@@ -134,6 +135,7 @@ export class DownloadManager extends EventEmitter {
   private readonly jsRuntimePath: string;
   private readonly globalLimiter: TokenBucket;
   private readonly hostLimiter: HostLimiter;
+  private readonly lineSpeed: LineSpeedMemory;
   private pumpQueued = false;
   private shutdownRequested = false;
   private shuttingDown = false;
@@ -151,6 +153,10 @@ export class DownloadManager extends EventEmitter {
     const settings = this.settingsService.get();
     this.globalLimiter = new TokenBucket(settings.globalSpeedLimitBps);
     this.hostLimiter = new HostLimiter(settings.maxConnectionsPerHost);
+    this.lineSpeed = new LineSpeedMemory({
+      load: () => this.db.getSetting('lineSpeeds')?.value ?? null,
+      save: (json) => this.db.setSetting('lineSpeeds', json)
+    });
     this.settingsService.onChanged((next) => this.handleSettingsChanged(next));
   }
 
@@ -588,6 +594,7 @@ export class DownloadManager extends EventEmitter {
     return {
       http,
       hostLimiter: this.hostLimiter,
+      lineSpeed: this.lineSpeed,
       globalLimiter: this.globalLimiter,
       logger: (level, message, detail) => this.logger[level === 'debug' ? 'debug' : level]('engine', message, detail),
       reservedTargetPaths: this.reservations,
@@ -1462,7 +1469,11 @@ export class DownloadManager extends EventEmitter {
       // Turbo only makes sense when nothing caps the speed: a limit means "use less".
       turbo:
         (record.turboMode ?? settings.turboMode) && !speedLimit && !settings.globalSpeedLimitBps
-          ? { maxConnections: Math.max(settings.turboMaxConnections, record.connections) }
+          ? {
+              maxConnections: Math.max(settings.turboMaxConnections, record.connections),
+              // Mbit/s (decimal, as a speed test reports it) to bytes per second.
+              lineSpeedBps: settings.lineSpeedMbps > 0 ? Math.round((settings.lineSpeedMbps * 1_000_000) / 8) : undefined
+            }
           : undefined,
       speedLimitBps: speedLimit,
       maxRetries: record.maxRetries || settings.maxRetries,
@@ -1699,40 +1710,40 @@ export class DownloadManager extends EventEmitter {
       }
       // Batch repeat: queue the next copy with everything this one needed. Without
       // the cookies, headers and referrer a login-protected file is refused (403)
-      // and the whole batch stops after the first copy.
+      // and the whole batch stops after the first copy. Media downloads also keep
+      // the exact format that was chosen, so every copy matches the first one.
       const batchTotal = record.repeatTotal ?? 1;
       if (record.repeatCount && record.repeatCount > 1) {
-        if (record.kind !== 'http' && record.kind !== 'ftp') {
-          this.logger.warn('downloads', 'Batch repeat is only available for plain HTTP and FTP downloads.');
-        } else {
-          try {
-            const baseName = record.fileNameExplicit ? (this.repeatBaseNames.get(record.id) ?? record.fileName) : undefined;
-            this.repeatBaseNames.delete(record.id);
-            await this.addDownload({
-              url: record.url,
-              fileName: baseName,
-              destinationDir: record.destinationDir,
-              queueId: record.queueId,
-              priority: record.priority,
-              speedLimitBps: record.speedLimitBps,
-              headers: record.headers,
-              cookies: record.cookies,
-              referrer: record.referrer,
-              sourcePageUrl: record.sourcePageUrl,
-              checksum: record.checksum,
-              checksumAlgorithm: record.checksumAlgorithm,
-              tlsAllowInsecure: record.tlsAllowInsecure,
-              turboMode: record.turboMode,
-              connections: record.connections,
-              autoDelete: record.autoDelete,
-              startNow: true,
-              repeatCount: record.repeatCount - 1,
-              repeatTotal: batchTotal
-            });
-            this.logger.info('downloads', `Batch repeat: queued copy ${batchTotal - record.repeatCount + 2} of ${batchTotal}.`);
-          } catch (error) {
-            this.logger.warn('downloads', `Batch repeat stopped: ${(error as Error).message}`);
-          }
+        try {
+          const baseName = record.fileNameExplicit ? (this.repeatBaseNames.get(record.id) ?? record.fileName) : undefined;
+          this.repeatBaseNames.delete(record.id);
+          const mediaFormatId = selectedMediaFormatId(record.mediaFormatJson);
+          await this.addDownload({
+            url: record.url,
+            fileName: baseName,
+            destinationDir: record.destinationDir,
+            queueId: record.queueId,
+            priority: record.priority,
+            speedLimitBps: record.speedLimitBps,
+            headers: record.headers,
+            cookies: record.cookies,
+            referrer: record.referrer,
+            sourcePageUrl: record.sourcePageUrl,
+            mediaFormatId,
+            mediaEngine: record.kind === 'youtube' ? 'yt-dlp' : undefined,
+            checksum: record.checksum,
+            checksumAlgorithm: record.checksumAlgorithm,
+            tlsAllowInsecure: record.tlsAllowInsecure,
+            turboMode: record.turboMode,
+            connections: record.connections,
+            autoDelete: record.autoDelete,
+            startNow: true,
+            repeatCount: record.repeatCount - 1,
+            repeatTotal: batchTotal
+          });
+          this.logger.info('downloads', `Batch repeat: queued copy ${batchTotal - record.repeatCount + 2} of ${batchTotal}.`);
+        } catch (error) {
+          this.logger.warn('downloads', `Batch repeat stopped: ${(error as Error).message}`);
         }
       } else if (batchTotal > 1) {
         this.host.notify('Batch complete', `All ${batchTotal} downloads finished.`);
@@ -2064,6 +2075,17 @@ function clampInt(value: unknown, min: number, max: number): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return min;
   return Math.min(max, Math.max(min, Math.round(parsed)));
+}
+
+/** The id of the media format that was downloaded, so a repeated copy uses the same quality. */
+function selectedMediaFormatId(mediaFormatJson: string): string | undefined {
+  if (!mediaFormatJson) return undefined;
+  try {
+    const parsed = JSON.parse(mediaFormatJson) as { id?: unknown };
+    return typeof parsed.id === 'string' && parsed.id ? parsed.id : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function categoryFromMime(mimeType: string): FileCategory {

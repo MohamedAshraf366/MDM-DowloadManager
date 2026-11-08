@@ -144,9 +144,14 @@ export class Semaphore {
   }
 }
 
+/** How long a refusal level is remembered. */
+const LEARNED_LIMIT_TTL_MS = 10 * 60 * 1000;
+
 export class HostLimiter {
   private readonly hosts = new Map<string, Semaphore>();
   private readonly boosts = new Set<{ limit: number }>();
+  private readonly learnedLimits = new Map<string, { limit: number; at: number }>();
+  private readonly streams = new Map<string, number>();
   private limit: number;
 
   constructor(limit = 8) {
@@ -181,6 +186,47 @@ export class HostLimiter {
       if (!this.boosts.delete(lease)) return;
       this.applyLimit();
     };
+  }
+
+  /**
+   * Connections the server has actually accepted and is still streaming, across
+   * all downloads. (Not the same as slots held: a connection being refused holds
+   * a slot too, so counting those would overstate what the server accepts.)
+   */
+  streamsOpen(host: string): number {
+    return this.streams.get(host) ?? 0;
+  }
+
+  /** Call when a connection starts delivering data; call the result when it ends. */
+  streamOpened(host: string): () => void {
+    this.streams.set(host, (this.streams.get(host) ?? 0) + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const remaining = (this.streams.get(host) ?? 1) - 1;
+      if (remaining <= 0) this.streams.delete(host);
+      else this.streams.set(host, remaining);
+    };
+  }
+
+  /**
+   * Remember that a server refused connections once this many were open. Keeps
+   * the highest figure seen, since each refusal happens at the limit. It expires,
+   * because limits change (and 429 can also mean "too fast", not "too many").
+   */
+  learn(host: string, limit: number, now = Date.now()): void {
+    const known = this.learnedLimits.get(host);
+    const fresh = known && now - known.at < LEARNED_LIMIT_TTL_MS;
+    const value = Math.max(1, Math.floor(limit));
+    this.learnedLimits.set(host, { limit: fresh ? Math.max(known.limit, value) : value, at: now });
+  }
+
+  /** How many connections this host was last seen to accept, if known and recent. */
+  learned(host: string, now = Date.now()): number | undefined {
+    const known = this.learnedLimits.get(host);
+    if (!known || now - known.at >= LEARNED_LIMIT_TTL_MS) return undefined;
+    return known.limit;
   }
 
   acquire(host: string, signal?: AbortSignal): Promise<() => void> {

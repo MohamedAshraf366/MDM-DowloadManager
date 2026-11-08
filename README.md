@@ -68,7 +68,7 @@ The transfer engine opens up to eight connections per download, resumes interrup
 - Automatic single-stream fallback for servers and signed CDN links that do not support range requests.
 - Streaming writes and sparse positioned I/O, so multi-GB files are not loaded into memory.
 - FTP downloads alongside HTTP/HTTPS.
-- Optional **Turbo mode** (Settings → Transfers): while a download runs, MDM adds connections until the measured speed stops rising, whatever your line speed is, then holds there. It never assumes a number; it only watches throughput. Extra connections are released when the download ends, it backs off if the server answers 429/503 or resets connections, and it is skipped when a speed limit is set.
+- Optional **Turbo mode** (Settings → Transfers): while a download runs, MDM adds connections until the measured speed stops rising, whatever your line speed is, then holds there. It never assumes a number; it only watches throughput. Extra connections are released when the download ends, it backs off if the server answers 429/503 or resets connections, and it is skipped when a speed limit is set. It learns what each network delivers, separately for every network you connect to, and uses that only as a starting point: a faster network (or a faster plan) is found by measuring, never capped by an old figure.
 - Disk-space checks before a transfer starts.
 - SHA-256, SHA-1, and MD5 checksum verification.
 

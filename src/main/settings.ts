@@ -158,6 +158,7 @@ export class SettingsService {
     const result: Partial<AppSettings> = {};
     const keys: Array<keyof AppSettings> = [
       'theme',
+      'speedUnit',
       'defaultDownloadDir',
       'categoryFolders',
       'categorizeByType',
@@ -166,6 +167,7 @@ export class SettingsService {
       'maxConnectionsPerHost',
       'turboMode',
       'turboMaxConnections',
+      'lineSpeedMbps',
       'globalSpeedLimitBps',
       'defaultSpeedLimitBps',
       'connectTimeoutMs',
@@ -212,6 +214,7 @@ export class SettingsService {
     s.maxConnectionsPerHost = clampInt(s.maxConnectionsPerHost, 1, 64, 8);
     s.turboMode = s.turboMode === true;
     s.turboMaxConnections = clampInt(s.turboMaxConnections, 2, 64, 16);
+    s.lineSpeedMbps = clampInt(s.lineSpeedMbps, 0, 100_000, 0);
     s.globalSpeedLimitBps = clampInt(s.globalSpeedLimitBps, 0, 10_000_000_000, 0);
     s.defaultSpeedLimitBps = clampInt(s.defaultSpeedLimitBps, 0, 10_000_000_000, 0);
     s.connectTimeoutMs = clampInt(s.connectTimeoutMs, 1000, 300_000, 20_000);
@@ -221,6 +224,7 @@ export class SettingsService {
     s.maxRedirects = clampInt(s.maxRedirects, 0, 30, 10);
     s.bridgePort = clampInt(s.bridgePort, 1024, 65535, 41731);
     if (!['light', 'dark', 'system'].includes(s.theme)) s.theme = 'system';
+    if (s.speedUnit !== 'bits') s.speedUnit = 'bytes';
     if (!['rename', 'overwrite', 'skip', 'allow'].includes(s.duplicatePolicy)) s.duplicatePolicy = 'rename';
     if (!['any', 'ipv4', 'ipv6'].includes(s.ipVersion)) s.ipVersion = 'any';
     if (!['error', 'warn', 'info', 'debug'].includes(s.loggingLevel)) s.loggingLevel = 'info';

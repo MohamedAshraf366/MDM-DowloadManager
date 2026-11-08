@@ -583,6 +583,10 @@
     let suppressClick = false;
     target.pill.addEventListener('pointerdown', (event) => {
       if (event.button !== 0 || event.isPrimary === false) return;
+      // The close control lives inside the pill. Starting a drag (and capturing
+      // the pointer) there would retarget the following click to the pill, so
+      // the overlay would open instead of closing.
+      if (event.target instanceof Element && event.target.closest('.close')) return;
       const origin = options.origin();
       drag = {
         id: event.pointerId,
@@ -644,6 +648,7 @@
         event.stopPropagation();
         return;
       }
+      if (event.target instanceof Element && event.target.closest('.close')) return;
       options.toggle();
     });
   }
@@ -769,6 +774,7 @@
         state.error = '';
         if (state.host) state.host.style.display = 'none';
       };
+      close.addEventListener('pointerdown', (event) => event.stopPropagation());
       close.addEventListener('click', (event) => {
         event.stopPropagation();
         hideForPage();
@@ -1237,6 +1243,7 @@
         dismissOverlay(GENERIC_DISMISS_KEY);
         genericScan();
       };
+      close.addEventListener('pointerdown', (event) => event.stopPropagation());
       close.addEventListener('click', (event) => {
         event.stopPropagation();
         hideForPage();

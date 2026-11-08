@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { AppSettings, FileCategory, ProxySettings, ThemeMode } from '../../shared/types';
+import type { AppSettings, FileCategory, ProxySettings, SpeedUnit, ThemeMode } from '../../shared/types';
 import { useApp } from '../app/store';
 import { downloadTextFile, readTextFile } from '../lib/files';
 import {
@@ -201,6 +201,20 @@ export function SettingsPage() {
                 ]}
               />
             </div>
+            <div className="setting-row">
+              <div>
+                <strong>Show speeds in</strong>
+                <p>Mbit/s matches what a speed test or your internet plan quotes. MB/s is the file-size style (1 MB/s is 8 Mbit/s).</p>
+              </div>
+              <Segmented<SpeedUnit>
+                value={draft.speedUnit}
+                onChange={(value) => update('speedUnit', value)}
+                options={[
+                  { value: 'bytes', label: 'MB/s' },
+                  { value: 'bits', label: 'Mbit/s' }
+                ]}
+              />
+            </div>
             <div className="setting-row is-last">
               <div>
                 <strong>Taskbar progress</strong>
@@ -351,6 +365,18 @@ export function SettingsPage() {
                     max={64}
                     value={draft.turboMaxConnections}
                     onChange={(event) => update('turboMaxConnections', Number(event.target.value))}
+                  />
+                </Field>
+                <Field
+                  label="Starting point: speed test result (Mbit/s)"
+                  hint="Optional, leave 0. MDM learns what each network delivers by itself. A number here only helps Turbo start faster; it is never a limit, and a faster network is still found."
+                >
+                  <TextInput
+                    type="number"
+                    min={0}
+                    max={100000}
+                    value={draft.lineSpeedMbps}
+                    onChange={(event) => update('lineSpeedMbps', Number(event.target.value))}
                   />
                 </Field>
               </div>

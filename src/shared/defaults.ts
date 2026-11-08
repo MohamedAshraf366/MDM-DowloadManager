@@ -12,6 +12,7 @@ export const DEFAULT_CATEGORY_FOLDERS: Record<FileCategory, string> = {
 
 export const DEFAULT_SETTINGS: AppSettings = {
   theme: 'system',
+  speedUnit: 'bytes',
   defaultDownloadDir: '',
   categoryFolders: { ...DEFAULT_CATEGORY_FOLDERS },
   categorizeByType: true,
@@ -20,6 +21,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   maxConnectionsPerHost: 32,
   turboMode: true,
   turboMaxConnections: 32,
+  lineSpeedMbps: 0,
   globalSpeedLimitBps: 0,
   defaultSpeedLimitBps: 0,
   connectTimeoutMs: 20_000,

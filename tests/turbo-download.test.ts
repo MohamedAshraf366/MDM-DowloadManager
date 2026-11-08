@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { HttpClient } from '../src/engine/http-client';
 import { HttpDownloadTask } from '../src/engine/http-download';
 import { HostLimiter, TokenBucket } from '../src/engine/rate-limiter';
+import { LineSpeedMemory, type LineSpeedSource } from '../src/engine/line-speed';
 import type { DownloadConfig, EngineCallbacks, EngineRuntime } from '../src/engine/types';
 import { startLinkServer, type LinkServer } from './support/link-server';
 
@@ -17,7 +18,13 @@ afterEach(async () => {
   servers = [];
 });
 
-async function download(url: string, connections: number, turboMax: number | null, speedLimitBps = 0) {
+async function download(
+  url: string,
+  connections: number,
+  turboMax: number | null,
+  speedLimitBps = 0,
+  lineSpeed?: LineSpeedSource
+) {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'mdm-turbo-'));
   const logs: string[] = [];
   const hostLimiter = new HostLimiter(connections);
@@ -32,6 +39,7 @@ async function download(url: string, connections: number, turboMax: number | nul
       maxSocketsPerHost: connections
     }),
     hostLimiter,
+    lineSpeed,
     globalLimiter: new TokenBucket(0),
     logger: () => undefined,
     reservedTargetPaths: new Set<string>()
@@ -104,6 +112,27 @@ describe('Turbo on a simulated connection', () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(granted).toBe(4);
     releases.forEach((release) => release());
+  }, 120_000);
+
+  it('is not held back by a speed remembered from a slower network, and learns the new one', async () => {
+    const size = 72 * MB;
+    // The network before did 32 Mbit/s (4 MB/s). This one does 96 Mbit/s (12 MB/s).
+    const link = await startLinkServer({ lineBps: 12 * MB, perConnectionBps: 1 * MB, size });
+    servers.push(link);
+    let stored: string | null = null;
+    const memory = new LineSpeedMemory({ load: () => stored, save: (json) => (stored = json) }, () => 'this-network');
+    memory.observe(4_000_000);
+
+    const result = await download(link.url, 4, 16, 0, memory);
+
+    expect(result.bytes).toBe(size);
+    expect(result.holes).toBe(false);
+    expect(result.logs.some((line) => /This network has delivered about 32\.0 Mbit\/s before/.test(line))).toBe(true);
+    // A 32 Mbit/s ceiling would have kept it near 4 connections; it went well past that.
+    expect(link.stats.maxConcurrent).toBeGreaterThan(8);
+    expect(result.seconds).toBeLessThan((size / (4 * MB)) * 0.7);
+    // What it measured replaces the old figure over time: it is now well above 32 Mbit/s.
+    expect(memory.hint()!).toBeGreaterThan(6_000_000);
   }, 120_000);
 
   it('adds nothing when the starting connections already fill the line', async () => {

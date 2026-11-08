@@ -75,7 +75,59 @@ async function loginServer() {
   return { url: `http://127.0.0.1:${(server.address() as AddressInfo).port}/file.bin`, stats };
 }
 
+/** A small HLS stream, so repeat is exercised for a media download too. */
+async function hlsServer() {
+  const segments = [Buffer.alloc(48 * 1024, 0x51), Buffer.alloc(40 * 1024, 0x52)];
+  const playlist = [
+    '#EXTM3U',
+    '#EXT-X-VERSION:3',
+    '#EXT-X-TARGETDURATION:4',
+    ...segments.flatMap((_segment, index) => ['#EXTINF:4.0,', `seg${index}.ts`]),
+    '#EXT-X-ENDLIST',
+    ''
+  ].join('\n');
+  const server = createServer((request, response) => {
+    if (request.url === '/hls/stream.m3u8') {
+      response.writeHead(200, { 'Content-Type': 'application/vnd.apple.mpegurl' });
+      response.end(playlist);
+      return;
+    }
+    const match = /^\/hls\/seg(\d+)\.ts$/.exec(request.url ?? '');
+    const segment = match ? segments[Number(match[1])] : undefined;
+    if (!segment) {
+      response.writeHead(404);
+      response.end();
+      return;
+    }
+    response.writeHead(200, { 'Content-Type': 'video/mp2t', 'Content-Length': segment.length });
+    response.end(segment);
+  });
+  servers.push(server);
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  return {
+    url: `http://127.0.0.1:${(server.address() as AddressInfo).port}/hls/stream.m3u8`,
+    bytes: Buffer.concat(segments)
+  };
+}
+
 describe('batch repeat', () => {
+  it('repeats a media download with the same quality, not just plain HTTP files', async () => {
+    const { manager: m, destination, notifications } = await setup();
+    const stream = await hlsServer();
+    await m.addDownload({ url: stream.url, destinationDir: destination, fileName: 'clip.ts', repeatCount: 2 });
+    await vi.waitFor(() => expect(notifications).toContain('Batch complete'), { timeout: 30_000, interval: 100 });
+
+    const records = [...m.downloads.values()];
+    expect(records).toHaveLength(2);
+    expect(records.every((record) => record.status === 'completed')).toBe(true);
+    expect(records.every((record) => record.kind === 'hls')).toBe(true);
+    expect((await fsp.readdir(destination)).sort()).toEqual(['clip (1).ts', 'clip.ts']);
+    for (const name of ['clip.ts', 'clip (1).ts']) {
+      expect((await fsp.readFile(path.join(destination, name))).equals(stream.bytes)).toBe(true);
+    }
+  }, 45_000);
+
   it('keeps the login of the first copy, so every copy is accepted, and says when the batch is done', async () => {
     const { manager: m, destination, notifications } = await setup();
     const { url, stats } = await loginServer();

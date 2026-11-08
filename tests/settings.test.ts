@@ -87,3 +87,39 @@ describe('Turbo settings', () => {
     expect(settings.get().turboMode).toBe(false);
   });
 });
+
+describe('speed unit setting', () => {
+  it('defaults to bytes and accepts only bytes or bits', async () => {
+    const directory = await fsp.mkdtemp(path.join(os.tmpdir(), 'mdm-unit-settings-'));
+    directories.push(directory);
+    const db = new AppDatabase(path.join(directory, 'mdm.db'), { encrypt: (value) => value, decrypt: (value) => value });
+    db.open();
+    databases.push(db);
+    const settings = new SettingsService(db, path.join(directory, 'downloads'));
+    settings.initialize();
+    expect(settings.get().speedUnit).toBe('bytes');
+    settings.update({ patch: { speedUnit: 'bits' } });
+    expect(settings.get().speedUnit).toBe('bits');
+    settings.update({ patch: { speedUnit: 'furlongs' as unknown as 'bits' } });
+    expect(settings.get().speedUnit).toBe('bytes');
+  });
+});
+
+describe('line speed setting', () => {
+  it('is off by default and kept within a sane range', async () => {
+    const directory = await fsp.mkdtemp(path.join(os.tmpdir(), 'mdm-line-settings-'));
+    directories.push(directory);
+    const db = new AppDatabase(path.join(directory, 'mdm.db'), { encrypt: (value) => value, decrypt: (value) => value });
+    db.open();
+    databases.push(db);
+    const settings = new SettingsService(db, path.join(directory, 'downloads'));
+    settings.initialize();
+    expect(settings.get().lineSpeedMbps).toBe(0);
+    settings.update({ patch: { lineSpeedMbps: 32 } });
+    expect(settings.get().lineSpeedMbps).toBe(32);
+    settings.update({ patch: { lineSpeedMbps: -5 } });
+    expect(settings.get().lineSpeedMbps).toBe(0);
+    settings.update({ patch: { lineSpeedMbps: 10_000_000 } });
+    expect(settings.get().lineSpeedMbps).toBe(100_000);
+  });
+});

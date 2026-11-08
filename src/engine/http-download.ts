@@ -69,6 +69,16 @@ export interface ResolvedResume {
   reused: boolean;
 }
 
+/**
+ * How many connections must succeed for the download to succeed. Every other
+ * connection is a helper: if the server refuses it, it hands its range back and
+ * retires, so a server that allows fewer connections than we asked for slows the
+ * download down instead of failing it.
+ */
+const MANDATORY_WORKERS = 1;
+/** How long helpers wait for the first connection to deliver data before they start. */
+const HELPER_START_GATE_MS = 1500;
+
 /** Thrown inside a worker Turbo added when the server refuses it: the worker retires, the download goes on. */
 class TurboRetire extends Error {
   constructor() {
@@ -449,7 +459,11 @@ export class HttpDownloadTask {
     for (;;) {
       this.nextSegmentIndex = this.prepared.segments.reduce((max, segment) => Math.max(max, segment.index + 1), 0);
       this.claimed.clear();
-      const workerCount = Math.max(1, this.config.connections);
+      const learned = this.runtime.hostLimiter.learned(this.hostKey());
+      const workerCount = Math.max(1, learned === undefined ? this.config.connections : Math.min(this.config.connections, learned));
+      if (learned !== undefined && learned < this.config.connections) {
+        this.log('info', `This server accepted about ${learned} connections last time; starting with ${workerCount}.`);
+      }
       const results: PromiseSettledResult<void>[] = [];
       const pool = new Set<Promise<void>>();
       // Workers can be added while the download runs (Turbo), so track them in a set.
@@ -471,7 +485,20 @@ export class HttpDownloadTask {
       this.workerTarget = workerCount;
       this.turboBaseWorkers = workerCount;
       this.turboPushback = false;
-      for (let index = 0; index < workerCount; index += 1) spawn();
+      // The first connection goes alone. Helpers start once it is delivering data,
+      // so they can never crowd it out of a server that limits parallel connections.
+      const mandatory = Math.min(workerCount, MANDATORY_WORKERS);
+      for (let index = 0; index < mandatory; index += 1) spawn();
+      if (workerCount > mandatory) {
+        const staged: Promise<void> = (async () => {
+          await this.waitForFirstBytes(HELPER_START_GATE_MS);
+          if (this.paused || this.canceled) return;
+          for (let index = mandatory; index < workerCount; index += 1) spawn(true);
+        })().finally(() => {
+          pool.delete(staged);
+        });
+        pool.add(staged);
+      }
       const stopTurbo = allowTurbo ? this.startTurbo(spawn, workerCount) : (): void => undefined;
       try {
         while (pool.size > 0) await Promise.race(pool);
@@ -554,6 +581,31 @@ export class HttpDownloadTask {
     return null;
   }
 
+  private hostKey(): string {
+    try {
+      return new URL(this.prepared?.finalUrl ?? this.config.url).hostname;
+    } catch {
+      return '';
+    }
+  }
+
+  /** A helper was refused: Turbo must not push further, and the next download should start lower. */
+  private noteServerLimit(): void {
+    this.turboPushback = true;
+    const host = this.hostKey();
+    const open = this.runtime.hostLimiter.streamsOpen(host);
+    if (host && open > 0) this.runtime.hostLimiter.learn(host, open);
+  }
+
+  /** Waits until data has started to arrive (or the timeout, a pause or a cancel). */
+  private async waitForFirstBytes(timeoutMs: number): Promise<void> {
+    const startBytes = this.downloadedTotal;
+    const deadline = Date.now() + timeoutMs;
+    while (this.downloadedTotal <= startBytes && Date.now() < deadline && !this.paused && !this.canceled) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+
   /**
    * How many more connections the unfinished data can really keep busy. A new
    * worker first takes an unclaimed range; only when none are left does it
@@ -596,14 +648,22 @@ export class HttpDownloadTask {
     const prepared = this.prepared;
     const noop = (): void => undefined;
     if (!turbo || !prepared || !prepared.resumable || prepared.totalBytes === null) return noop;
-    const ceiling = Math.floor(turbo.maxConnections);
-    if (ceiling <= baseWorkers) return noop;
+    // Never climb past what this server was recently seen to accept.
+    const learned = this.runtime.hostLimiter.learned(this.hostKey());
+    const ceiling = Math.min(Math.floor(turbo.maxConnections), learned ?? Number.POSITIVE_INFINITY);
+    if (ceiling <= baseWorkers) {
+      this.log('info', `Turbo: no room to add connections (already ${baseWorkers}, limit ${ceiling}).`);
+      return noop;
+    }
     // A speed limit means "do not use more": more connections would be pointless.
     if (this.config.speedLimitBps > 0 || this.runtime.globalLimiter.getRate() > 0) return noop;
     if (this.splitHeadroom(2) < 2) return noop;
 
     const tuning = { ...DEFAULT_TURBO_TUNING, ...turbo.tuning };
-    const controller = new TurboController(baseWorkers, ceiling, tuning);
+    // A speed the person typed wins; otherwise what this network was seen to deliver. Either way
+    // it is only a starting point: the controller verifies it and looks beyond it.
+    const known = turbo.lineSpeedBps ?? this.runtime.lineSpeed?.hint();
+    const controller = new TurboController(baseWorkers, ceiling, tuning, known);
     const releaseHost = this.runtime.hostLimiter.boost(ceiling);
     const releaseSockets = this.runtime.http.boostSockets(ceiling);
     const mbit = (rate: number): string => `${((rate * 8) / 1_000_000).toFixed(1)} Mbit/s`;
@@ -615,13 +675,26 @@ export class HttpDownloadTask {
     };
     let lastAt = performance.now();
     let lastBytes = this.downloadedTotal;
-    this.log('info', `Turbo: starting from ${baseWorkers} connections (up to ${ceiling}).`);
+    // Best sustained rate seen during the run (a short moving average, not one noisy sample).
+    const recent: number[] = [];
+    let samples = 0;
+    let bestSustained = 0;
+    this.log(
+      'info',
+      `Turbo: starting from ${baseWorkers} connections (up to ${ceiling}).${known ? ` This network has delivered about ${mbit(known)} before.` : ''}`
+    );
     const timer = setInterval(() => {
       if (this.paused || this.canceled) return;
       const now = performance.now();
       const rate = ((this.downloadedTotal - lastBytes) * 1000) / Math.max(1, now - lastAt);
       lastAt = now;
       lastBytes = this.downloadedTotal;
+      samples += 1;
+      recent.push(rate);
+      if (recent.length > 3) recent.shift();
+      if (recent.length === 3 && samples > tuning.settleSamples) {
+        bestSustained = Math.max(bestSustained, (recent[0]! + recent[1]! + recent[2]!) / 3);
+      }
       const pushback = this.turboPushback;
       this.turboPushback = false;
       const limited = this.config.speedLimitBps > 0 || this.runtime.globalLimiter.getRate() > 0;
@@ -631,10 +704,21 @@ export class HttpDownloadTask {
         const added = decision.target - this.workerTarget;
         this.workerTarget = decision.target;
         for (let index = 0; index < added; index += 1) spawn(true);
-        this.log('info', `Turbo: now ${decision.target} connections (${mbit(decision.baselineRate)} before this step).`);
+        this.log(
+          'info',
+          decision.probe
+            ? `Turbo: reached ${mbit(decision.baselineRate)}, the speed known for this network; trying ${decision.target} connections to see whether it can do more.`
+            : `Turbo: now ${decision.target} connections (${mbit(decision.baselineRate)} before this step).`
+        );
       } else if (decision.action === 'stop') {
         this.workerTarget = decision.target;
-        this.log('info', `Turbo: holding at ${decision.target} connections around ${mbit(decision.rate)}; ${reasons[decision.reason]}.`);
+        const note =
+          known === undefined
+            ? ''
+            : decision.reason === 'plateau' && decision.rate < known * 0.85
+              ? ` This network reached ${mbit(known)} before, so the server or the route to it is the limit here, not your connection.`
+              : ` Known for this network: ${mbit(known)}.`;
+        this.log('info', `Turbo: holding at ${decision.target} connections around ${mbit(decision.rate)}; ${reasons[decision.reason]}.${note}`);
         clearInterval(timer);
       }
     }, tuning.sampleMs);
@@ -643,6 +727,8 @@ export class HttpDownloadTask {
       clearInterval(timer);
       releaseHost();
       releaseSockets();
+      // Remember what this network delivered, once per run and only from a run long enough to mean something.
+      if (samples >= 8 && bestSustained > 0) this.runtime.lineSpeed?.observe(bestSustained);
     };
   }
 
@@ -718,12 +804,16 @@ export class HttpDownloadTask {
         }
         const mapped = mapNetworkError(error);
         if (this.workerTarget > this.turboBaseWorkers && isServerPushback(mapped)) this.turboPushback = true;
-        // Surplus Turbo connections do not get a retry budget: hand the range back
-        // (its progress is kept) and let the controller settle at a count the server accepts.
-        if (optional && isServerPushback(mapped)) throw new TurboRetire();
+        const retryLimit = retryLimitFor(mapped, this.config.maxRetries);
+        // A helper gets one more try for an explicit "too many" and two for a
+        // reset or timeout (which can be a hiccup), then retires; its range goes back.
+        const patience = mapped.statusCode === 429 || mapped.statusCode === 503 ? 1 : 2;
+        if (optional && isServerPushback(mapped) && attempts >= Math.min(patience, retryLimit)) {
+          this.noteServerLimit();
+          throw new TurboRetire();
+        }
         // Retry budget is per segment: one flaky range must not consume the
         // whole download's allowance.
-        const retryLimit = retryLimitFor(mapped, this.config.maxRetries);
         if (!isRetryableNetworkError(mapped) || attempts >= retryLimit) {
           throw mapped;
         }
@@ -816,6 +906,7 @@ export class HttpDownloadTask {
     };
 
     let releaseHost: (() => void) | null = null;
+    let releaseStream: (() => void) | null = null;
     let response: HttpResponse | undefined;
     try {
       const hostname = new URL(this.prepared.finalUrl).hostname;
@@ -875,6 +966,8 @@ export class HttpDownloadTask {
       } else {
         throw httpStatusError(status, response.headers, response.url);
       }
+      // The server accepted this connection: it counts toward what the host allows.
+      releaseStream = this.runtime.hostLimiter.streamOpened(hostname);
       if (this.compressedDownload) {
         // The reported lengths describe the compressed body; the decoded size
         // is only known once the transfer finishes.
@@ -955,6 +1048,7 @@ export class HttpDownloadTask {
         pendingBytes = 0;
       }
       response?.close();
+      releaseStream?.();
       releaseHost?.();
     }
   }

@@ -24,6 +24,8 @@ export interface EngineRuntime {
   reservedTargetPaths?: Set<string>;
   resolveDirectory?: (fileName: string, mimeType: string) => Promise<string>;
   maxConnectionsPerHost?: number;
+  /** What this network has delivered before: Turbo's starting point, never a limit. */
+  lineSpeed?: import('./line-speed').LineSpeedSource;
   ytDlpPath?: string;
   ffmpegPath?: string;
   jsRuntimePath?: string;
@@ -47,6 +49,8 @@ export interface ResumeState {
 export interface TurboConfig {
   /** Most parallel connections Turbo may use for one download. */
   maxConnections: number;
+  /** A speed (bytes per second) the person gave as a starting point. Never a limit: Turbo verifies it and looks beyond it. */
+  lineSpeedBps?: number;
   /** Timing overrides (tests and benchmarks only). */
   tuning?: Partial<import('./turbo').TurboTuning>;
 }

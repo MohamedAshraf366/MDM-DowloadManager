@@ -1,3 +1,4 @@
+import { setSpeedUnit } from '../../shared/format';
 import {
   createContext,
   useCallback,
@@ -62,6 +63,8 @@ const AppContext = createContext<AppContextValue | null>(null);
 
 export function AppProvider({ children }: { children: ReactNode }) {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  // Idempotent and cheap: done during render so every speed drawn below uses the same unit.
+  setSpeedUnit(snapshot?.settings.speedUnit ?? 'bytes');
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [fatalError, setFatalError] = useState('');

@@ -397,9 +397,9 @@ try {
   assert.ok(Number.parseFloat(after.top) < 80);
   assert.ok(savedPosition);
 
-  await page.evaluate(() =>
-    document.querySelector('[data-mdm-overlay="video"]')?.shadowRoot?.querySelector('.close')?.click()
-  );
+  // A real pointer click, so pointer capture on the pill cannot retarget the
+  // click and open the panel instead of closing the overlay.
+  await page.locator('[data-mdm-overlay="video"] .close').click();
   await page.waitForFunction(() => !document.querySelector('[data-mdm-overlay="video"]'));
   await worker.evaluate(async () => {
     const tabs = await chrome.tabs.query({});
