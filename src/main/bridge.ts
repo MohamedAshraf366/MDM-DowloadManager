@@ -48,7 +48,14 @@ export class BrowserBridge {
   private readonly pairRates = new Map<string, RateEntry>();
   private readonly pendingDownloads = new Map<string, Promise<AddDownloadResult>>();
   private operation: Promise<void> = Promise.resolve();
-  private pairingPrompt = false;
+  /**
+   * The pairing decision currently on screen, if any. A second request from the
+   * same extension joins it instead of failing: the background worker and the
+   * popup often ask at the same moment, and both need the token from one prompt.
+   * Approvals are still never cached — once this settles, the next request asks
+   * again.
+   */
+  private pairingPrompt: Promise<boolean> | null = null;
   private lastError = '';
 
   constructor(
@@ -199,6 +206,24 @@ export class BrowserBridge {
   }
 
   /**
+   * Shows one pairing prompt and clears it when it settles, so a request that
+   * arrives afterwards asks again. A failure to show the prompt counts as a denial.
+   */
+  private askForPairing(confirmation: BrowserPairingConfirmation): Promise<boolean> {
+    const prompt = (async () => {
+      try {
+        return await this.confirmPairing!(confirmation);
+      } catch (error) {
+        this.logger.error('bridge', `Pairing confirmation failed: ${(error as Error).message}`);
+        return false;
+      }
+    })().finally(() => {
+      if (this.pairingPrompt === prompt) this.pairingPrompt = null;
+    });
+    return prompt;
+  }
+
+  /**
    * Only answer requests addressed to the loopback name the extension uses.
    * A DNS-rebinding page reaches this port under its own hostname, so rejecting
    * any other Host closes that route regardless of the token.
@@ -250,24 +275,20 @@ export class BrowserBridge {
         this.json(response, 503, { ok: false, error: 'Pairing confirmation is unavailable.' });
         return;
       }
-      if (this.pairingPrompt) {
-        this.json(response, 409, {
-          ok: false,
-          error: 'Another pairing request is already waiting for confirmation in MDM.'
-        });
-        return;
-      }
-      const extensionId = pairingExtensionId(request, origin);
-      this.pairingPrompt = true;
-      let approved = false;
-      try {
+      // The background worker and the popup can ask at the same moment. Let the
+      // second join the prompt that is already on screen instead of failing: it
+      // is the same extension and the same decision, and both need the token.
+      // Once the prompt settles, a later request asks again (nothing is cached).
+      let pending = this.pairingPrompt;
+      if (pending) {
+        this.logger.info('bridge', 'Browser extension pairing joined the prompt already waiting for confirmation.');
+      } else {
+        const extensionId = pairingExtensionId(request, origin);
         this.logger.info('bridge', `Browser extension pairing requested (${extensionId}).`);
-        approved = await this.confirmPairing({ extensionId, origin: origin.toLowerCase() });
-      } catch (error) {
-        this.logger.error('bridge', `Pairing confirmation failed: ${(error as Error).message}`);
-      } finally {
-        this.pairingPrompt = false;
+        pending = this.askForPairing({ extensionId, origin: origin.toLowerCase() });
+        this.pairingPrompt = pending;
       }
+      const approved = await pending;
       if (!approved) {
         this.logger.info('bridge', 'Browser extension pairing was declined.');
         this.json(response, 403, {

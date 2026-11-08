@@ -83,6 +83,38 @@ async function download(
 }
 
 describe('Turbo on a simulated connection', () => {
+  it('is active at the shipped default of 32 connections and holds the agreed count', async () => {
+    const size = 64 * MB;
+    // The whole line is 16 MB/s and each connection gives 0.5 MB/s, so 32
+    // connections are needed to fill it. The download lasts long enough for
+    // every helper to start.
+    const link = await startLinkServer({ lineBps: 16 * MB, perConnectionBps: 0.5 * MB, size });
+    servers.push(link);
+
+    const result = await download(link.url, 32, 32);
+
+    expect(result.bytes).toBe(size);
+    expect(result.holes).toBe(false);
+    // Turbo reports that it is on and confirms the agreed starting count.
+    expect(result.logs.some((line) => /Turbo: active with 32 connections, the agreed limit/.test(line))).toBe(true);
+    expect(link.stats.maxConcurrent).toBeLessThanOrEqual(32);
+    expect(link.stats.maxConcurrent).toBe(32);
+  }, 120_000);
+
+  it('grows from the agreed start up to the agreed ceiling and never past it', async () => {
+    const size = 48 * MB;
+    const link = await startLinkServer({ lineBps: 16 * MB, perConnectionBps: 0.25 * MB, size });
+    servers.push(link);
+
+    const result = await download(link.url, 2, 64);
+
+    expect(result.bytes).toBe(size);
+    expect(result.holes).toBe(false);
+    expect(result.logs.some((line) => /Turbo: active - starting from 2 connections \(up to 64\)/.test(line))).toBe(true);
+    expect(link.stats.maxConcurrent).toBeGreaterThan(2);
+    expect(link.stats.maxConcurrent).toBeLessThanOrEqual(64);
+  }, 120_000);
+
   it('uses the spare capacity of an under-used line, and gives it back afterwards', async () => {
     const size = 72 * MB;
     // Line 12 MB/s, but the server gives each connection only 1 MB/s: 4 connections can never exceed 4 MB/s.

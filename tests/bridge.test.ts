@@ -34,6 +34,7 @@ interface Harness {
   confirmDownload: ReturnType<typeof vi.fn>;
   confirmPairing: ReturnType<typeof vi.fn>;
   onQueued: ReturnType<typeof vi.fn>;
+  logger: AppLogger;
   setRule: (next: SiteRule | null) => void;
 }
 
@@ -67,7 +68,7 @@ async function harness(
   await bridge.apply({ enabled: true, port: 0, token: TOKEN });
   expect(bridge.listening).toBe(true);
   expect(bridge.port).toBeGreaterThan(0);
-  return { bridge, addDownload, confirmDownload, confirmPairing, onQueued, setRule: (next) => (activeRule = next) };
+  return { bridge, addDownload, confirmDownload, confirmPairing, onQueued, logger, setRule: (next) => (activeRule = next) };
 }
 
 interface BridgeResponse {
@@ -96,7 +97,7 @@ function request(
   }
   return new Promise((resolve, reject) => {
     const outgoing = http.request(
-      { host: '127.0.0.1', port: bridge.port, path, method: options.method ?? 'GET', headers },
+      { host: '127.0.0.1', port: bridge.port, path, method: options.method ?? 'GET', headers, agent: false },
       (response) => {
         const chunks: Buffer[] = [];
         response.on('data', (chunk: Buffer) => chunks.push(chunk));
@@ -252,9 +253,9 @@ describe('browser bridge', () => {
     expect(confirmPairing).toHaveBeenCalledTimes(1);
   });
 
-  it('rejects a concurrent prompt and asks again for the next pairing', async () => {
+  it('lets a concurrent request join the prompt already on screen, and asks again for the next pairing', async () => {
     let approveFirst!: (approved: boolean) => void;
-    const { bridge, confirmPairing } = await harness(
+    const { bridge, confirmPairing, logger } = await harness(
       undefined,
       () =>
         new Promise<boolean>((resolve) => {
@@ -270,15 +271,25 @@ describe('browser bridge', () => {
     const first = request(bridge, '/pair', { headers });
     await vi.waitFor(() => expect(confirmPairing).toHaveBeenCalledTimes(1));
 
-    const concurrent = await request(bridge, '/pair', { headers });
-    expect(concurrent.status).toBe(409);
-    expect(JSON.parse(concurrent.body).error).toMatch(/already waiting/i);
+    // The background worker and the popup can ask at once: both wait on one
+    // prompt and both receive the token, instead of one failing with an error.
+    const concurrent = request(bridge, '/pair', { headers });
+    await vi.waitFor(() =>
+      expect(logger.info).toHaveBeenCalledWith(
+        'bridge',
+        'Browser extension pairing joined the prompt already waiting for confirmation.'
+      )
+    );
     expect(confirmPairing).toHaveBeenCalledTimes(1);
 
     approveFirst(true);
     const firstResponse = await first;
+    const concurrentResponse = await concurrent;
     expect(firstResponse.status).toBe(200);
+    expect(concurrentResponse.status).toBe(200);
     expect(JSON.parse(firstResponse.body)).toMatchObject({ ok: true, data: { token: TOKEN } });
+    expect(JSON.parse(concurrentResponse.body)).toMatchObject({ ok: true, data: { token: TOKEN } });
+    expect(confirmPairing).toHaveBeenCalledTimes(1);
 
     // The earlier approval is not cached: the next request needs a new prompt.
     const later = request(bridge, '/pair', { headers });

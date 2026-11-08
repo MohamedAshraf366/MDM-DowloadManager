@@ -648,16 +648,16 @@ export class HttpDownloadTask {
     const prepared = this.prepared;
     const noop = (): void => undefined;
     if (!turbo || !prepared || !prepared.resumable || prepared.totalBytes === null) return noop;
+    // A speed limit means "do not use more": more connections would be pointless.
+    if (this.config.speedLimitBps > 0 || this.runtime.globalLimiter.getRate() > 0) return noop;
     // Never climb past what this server was recently seen to accept.
     const learned = this.runtime.hostLimiter.learned(this.hostKey());
     const ceiling = Math.min(Math.floor(turbo.maxConnections), learned ?? Number.POSITIVE_INFINITY);
-    if (ceiling <= baseWorkers) {
-      this.log('info', `Turbo: no room to add connections (already ${baseWorkers}, limit ${ceiling}).`);
-      return noop;
-    }
-    // A speed limit means "do not use more": more connections would be pointless.
-    if (this.config.speedLimitBps > 0 || this.runtime.globalLimiter.getRate() > 0) return noop;
-    if (this.splitHeadroom(2) < 2) return noop;
+    // With the starting count already at the limit (the shipped default is 32 of 32),
+    // there is nothing to add, but Turbo still runs: it confirms the agreed count,
+    // watches the speed and remembers what this network delivers.
+    const canGrow = ceiling > baseWorkers;
+    if (canGrow && this.splitHeadroom(2) < 2) return noop;
 
     const tuning = { ...DEFAULT_TURBO_TUNING, ...turbo.tuning };
     // A speed the person typed wins; otherwise what this network was seen to deliver. Either way
@@ -681,7 +681,9 @@ export class HttpDownloadTask {
     let bestSustained = 0;
     this.log(
       'info',
-      `Turbo: starting from ${baseWorkers} connections (up to ${ceiling}).${known ? ` This network has delivered about ${mbit(known)} before.` : ''}`
+      canGrow
+        ? `Turbo: active - starting from ${baseWorkers} connections (up to ${ceiling}).${known ? ` This network has delivered about ${mbit(known)} before.` : ''}`
+        : `Turbo: active with ${baseWorkers} connections, the agreed limit; it holds this count and measures the speed.`
     );
     const timer = setInterval(() => {
       if (this.paused || this.canceled) return;

@@ -68,6 +68,11 @@ describe('Turbo settings', () => {
     const settings = await service();
     expect(settings.get().turboMode).toBe(DEFAULT_SETTINGS.turboMode);
     expect(settings.get().turboMaxConnections).toBe(DEFAULT_SETTINGS.turboMaxConnections);
+    // The agreed defaults: Turbo on, 32 connections, a 32-connection ceiling.
+    expect(DEFAULT_SETTINGS.turboMode).toBe(true);
+    expect(DEFAULT_SETTINGS.defaultConnections).toBe(32);
+    expect(DEFAULT_SETTINGS.turboMaxConnections).toBe(32);
+    expect(settings.get().defaultConnections).toBe(32);
     expect(DEFAULT_SETTINGS.turboMaxConnections).toBeGreaterThanOrEqual(2);
     expect(DEFAULT_SETTINGS.turboMaxConnections).toBeLessThanOrEqual(64);
   });

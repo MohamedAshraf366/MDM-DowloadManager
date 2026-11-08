@@ -12,6 +12,12 @@
   // Pairing now opens a confirmation dialog in MDM, so the fetch must wait for
   // a person to read it instead of giving up after a few seconds.
   const PAIR_TIMEOUT_MS = 120_000;
+  // A second request for the same prompt (for example the popup opening while
+  // the background worker is already pairing) shares one fetch here, and when
+  // another context owns the prompt it reuses the token that context stores.
+  let pairingInFlight = null;
+  const PAIR_JOIN_WAIT_MS = 30_000;
+  const PAIR_JOIN_POLL_MS = 400;
 
   const PAGE_MEDIA_PATTERN = /\.(m3u8|m3u|mpd|mp4|m4v|mkv|webm|mov|flv|avi|ts|mp3|m4a|aac|flac|wav|ogg|opus)(?:$|[?#])/i;
 
@@ -53,13 +59,39 @@
     return next;
   }
 
-  async function connect(port) {
+  async function connect(port, force) {
+    const current = await getConfig();
+    const target = clampPort(port ?? current.port);
+    // Only join a pairing aimed at the same bridge: a startup attempt for the
+    // default port must not swallow a request for a different one.
+    if (pairingInFlight && pairingInFlight.port === target) return pairingInFlight.promise;
+    const promise = pair(target, force).finally(() => {
+      if (pairingInFlight?.promise === promise) pairingInFlight = null;
+    });
+    pairingInFlight = { port: target, promise };
+    return promise;
+  }
+
+  async function waitForStoredToken() {
+    const deadline = Date.now() + PAIR_JOIN_WAIT_MS;
+    while (Date.now() < deadline) {
+      const config = await getConfig();
+      if (config.token) return config;
+      await new Promise((resolve) => setTimeout(resolve, PAIR_JOIN_POLL_MS));
+    }
+    return null;
+  }
+
+  async function pair(port, force) {
     if (!autoPairSupported) {
       throw new Error(
         'Firefox cannot verify this add-on automatically. Copy the bridge token from MDM (Browser) and paste it into the token field.'
       );
     }
     const current = await getConfig();
+    // The background worker or the popup may have paired while this call was queued.
+    // A forced call (the stored token was rejected) still asks MDM for a new one.
+    if (current.token && !force) return current;
     const target = clampPort(port ?? current.port);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), PAIR_TIMEOUT_MS);
@@ -76,6 +108,14 @@
       throw new Error(`Could not reach MDM on 127.0.0.1:${target} - ${reason}. Start MDM and try again.`);
     } finally {
       clearTimeout(timer);
+    }
+    if (response.status === 409) {
+      // An older MDM allows one prompt at a time. Wait for the context that owns
+      // it to store the token instead of showing a failure for a prompt that is
+      // already on screen.
+      const paired = await waitForStoredToken();
+      if (paired) return paired;
+      throw new Error('A pairing prompt is waiting in MDM. Approve it there, then try again.');
     }
     const text = await response.text();
     let payload = null;
@@ -125,7 +165,7 @@
       }
 
       if (response.status === 401 && attempt === 0) {
-        config = await connect(config.port);
+        config = await connect(config.port, true);
         continue;
       }
       const text = await response.text();
